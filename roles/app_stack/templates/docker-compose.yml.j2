@@ -1,0 +1,715 @@
+version: '3.8'
+
+networks:
+  ai_stack_network:
+    driver: bridge
+    name: ai_stack_network
+
+volumes:
+  n8n_data:
+  ollama_data:
+  qdrant_data:
+  openwebui_data:
+  flowise_data:
+  caddy_data:
+  caddy_config:
+
+  # Supabase volumes
+  supabase_db_data:
+  supabase_storage_data:
+  supabase_kong_data: # Для Kong, если он хранит что-то на диске
+  # Дополнительные тома могут потребоваться в зависимости от конфигурации
+
+  # Langfuse volumes (будут детализированы при добавлении сервисов Langfuse)
+  langfuse_postgres_data:
+  langfuse_clickhouse_data:
+  langfuse_clickhouse_logs:
+  langfuse_minio_data:
+  langfuse_valkey_data:
+
+services:
+  caddy:
+    image: "{{ caddy_image }}"
+    container_name: caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp" # Для HTTP/3
+    networks:
+      - ai_stack_network
+    volumes:
+      - "{{ ai_stack_project_dir }}/Caddyfile:/etc/caddy/Caddyfile:ro"
+      - caddy_data:/data:rw
+      - caddy_config:/config:rw
+    environment:
+      # Эти переменные будут использоваться в Caddyfile.j2
+      # и будут зависеть от выбора пользователя (домен или IP:порт)
+      N8N_HOSTNAME: "{% if use_custom_domain == 'yes' %}n8n.{{ main_domain_name }}{% else %}:{{ caddy_n8n_port | default('8001') }}{% endif %}"
+      OPENWEBUI_HOSTNAME: "{% if use_custom_domain == 'yes' %}openwebui.{{ main_domain_name }}{% else %}:{{ caddy_openwebui_port | default('8002') }}{% endif %}"
+      FLOWISE_HOSTNAME: "{% if use_custom_domain == 'yes' %}flowise.{{ main_domain_name }}{% else %}:{{ caddy_flowise_port | default('8003') }}{% endif %}"
+      OLLAMA_HOSTNAME: "{% if use_custom_domain == 'yes' %}ollama.{{ main_domain_name }}{% else %}:{{ caddy_ollama_port | default('8004') }}{% endif %}"
+      SUPABASE_HOSTNAME: "{% if use_custom_domain == 'yes' %}supabase.{{ main_domain_name }}{% else %}:{{ caddy_supabase_port | default('8005') }}{% endif %}"
+      SEARXNG_HOSTNAME: "{% if use_custom_domain == 'yes' %}searxng.{{ main_domain_name }}{% else %}:{{ caddy_searxng_port | default('8006') }}{% endif %}"
+      LANGFUSE_HOSTNAME: "{% if use_custom_domain == 'yes' %}langfuse.{{ main_domain_name }}{% else %}:{{ caddy_langfuse_port | default('8007') }}{% endif %}"
+      LETSENCRYPT_EMAIL: "{{ letsencrypt_email | default('internal') }}" # 'internal' для самоподписанных сертификатов, если email не указан
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE # Необходимо для привязки к портам < 1024 без root
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # --- Ollama ---
+  ollama:
+    image: "{% if ollama_profile == 'amd' %}{{ ollama_rocm_image }}{% else %}{{ ollama_image }}{% endif %}"
+    container_name: ollama
+    restart: unless-stopped
+    networks:
+      - ai_stack_network
+    volumes:
+      - ollama_data:/root/.ollama
+    ports: # Публикуем порт, чтобы к нему можно было обращаться с хоста, если нужно
+      - "127.0.0.1:11434:11434"
+    environment:
+      - OLLAMA_HOST=0.0.0.0 # Слушать на всех интерфейсах внутри контейнера
+      # - OLLAMA_MODELS=/ollama/models # Если нужно кастомное расположение моделей внутри тома
+      # - OLLAMA_DEBUG={{ ollama_debug | default('false') }}
+      # - OLLAMA_MAX_LOADED_MODELS={{ ollama_max_loaded_models | default(1) }}
+      # - OLLAMA_NUM_PARALLEL={{ ollama_num_parallel | default(1) }}
+      # - OLLAMA_KEEP_ALIVE={{ ollama_keep_alive | default('5m') }}
+    {% if ollama_profile == 'nvidia' %}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all # или конкретное количество GPU
+              capabilities: [gpu]
+    {% elif ollama_profile == 'amd' %}
+    devices: # Для ROCm
+      - "/dev/kfd:/dev/kfd"
+      - "/dev/dri:/dev/dri"
+    group_add: # Добавление пользователя в группу render для доступа к GPU
+      - "render"
+    {% endif %}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # --- OpenWebUI ---
+  openwebui:
+    image: "{{ open_webui_image }}"
+    container_name: open-webui
+    restart: unless-stopped
+    ports: # Внутренний порт 8080, Caddy будет проксировать на него
+      - "127.0.0.1:3000:8080" # Маппим на localhost:3000 для Caddy
+    networks:
+      - ai_stack_network
+    volumes:
+      - openwebui_data:/app/backend/data
+    environment:
+      # OLLAMA_BASE_URL должен указывать на сервис ollama внутри Docker сети
+      - 'OLLAMA_BASE_URL=http://ollama:11434'
+      # - 'OPENAI_API_KEY=' # Если нужно подключить OpenAI
+      # - 'WEBUI_SECRET_KEY=' # Сгенерировать и установить для безопасности
+      # - 'ENABLE_SIGNUP={{ openwebui_enable_signup | default(true) }}'
+    depends_on:
+      - ollama
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # --- Qdrant ---
+  qdrant:
+    image: "{{ qdrant_image }}"
+    container_name: qdrant
+    restart: unless-stopped
+    ports: # Внутренний порт 6333, Caddy не будет на него проксировать напрямую
+      - "127.0.0.1:6333:6333" # gRPC
+      - "127.0.0.1:6334:6334" # HTTP REST
+    networks:
+      - ai_stack_network
+    volumes:
+      - qdrant_data:/qdrant/storage
+    # environment:
+      # - QDRANT__SERVICE__API_KEY={{ qdrant_api_key | default('') }} # Если нужна аутентификация
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # --- Flowise ---
+  flowise:
+    image: "{{ flowise_image }}"
+    container_name: flowise
+    restart: unless-stopped
+    ports: # Внутренний порт 3001, Caddy будет проксировать
+      - "127.0.0.1:3001:3001"
+    networks:
+      - ai_stack_network
+    volumes:
+      - flowise_data:/root/.flowise
+    environment:
+      - PORT=3001
+      # - FLOWISE_USERNAME={{ flowise_username | default('') }}
+      # - FLOWISE_PASSWORD={{ flowise_password | default('') }}
+      # - DEBUG=true
+      # Переменные для подключения к базам данных и другим сервисам
+      - DATABASE_PATH=/root/.flowise # По умолчанию SQLite
+      # - DATABASE_TYPE=postgres # Если использовать PostgreSQL
+      # - DATABASE_HOST= # Имя сервиса PostgreSQL
+      # - DATABASE_PORT=5432
+      # - DATABASE_USER=
+      # - DATABASE_PASSWORD=
+      # - DATABASE_NAME=
+      - OLLAMA_API_BASE_URL=http://ollama:11434
+      - QDRANT_URL=http://qdrant:6333
+    depends_on:
+      - ollama
+      - qdrant
+      # - postgres_service_name # Если Flowise будет использовать PostgreSQL
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # --- n8n ---
+  n8n:
+    image: "{{ n8n_image }}"
+    container_name: n8n
+    restart: unless-stopped
+    ports: # Внутренний порт 5678, Caddy будет проксировать
+      - "127.0.0.1:5678:5678"
+    networks:
+      - ai_stack_network
+    volumes:
+      - n8n_data:/home/node/.n8n
+      # - "{{ ai_stack_project_dir }}/n8n_local_files:/files" # Для локального доступа к файлам
+    environment:
+      - N8N_HOST={{ ansible_fqdn if use_custom_domain == 'yes' else ansible_default_ipv4.address }}
+      - N8N_PORT=5678
+      - N8N_PROTOCOL={% if use_custom_domain == 'yes' %}https{% else %}http{% endif %}
+      - WEBHOOK_URL={% if use_custom_domain == 'yes' %}https://n8n.{{ main_domain_name }}{% else %}http://{{ ansible_default_ipv4.address }}:{{ caddy_n8n_port | default('8001') }}{% endif %}/
+      - N8N_ENCRYPTION_KEY={{ n8n_encryption_key }} # Должна быть установлена из vault или vars_prompt
+      - N8N_USER_MANAGEMENT_JWT_SECRET={{ n8n_jwt_secret }} # Должна быть установлена
+      - GENERIC_TIMEZONE={{ ansible_date_time.tz }}
+      # - EXECUTIONS_DATA_PRUNE=true
+      # - EXECUTIONS_DATA_MAX_AGE=30 # в днях
+      # - DB_TYPE= # Если использовать внешнюю БД, например Supabase PostgreSQL
+      # - DB_POSTGRESDB_HOST= # Имя сервиса Supabase PostgreSQL
+      # - DB_POSTGRESDB_PORT=5432
+      # - DB_POSTGRESDB_DATABASE=postgres
+      # - DB_POSTGRESDB_USER=postgres
+      # - DB_POSTGRESDB_PASSWORD={{ supabase_postgres_password }}
+      # - DB_POSTGRESDB_SCHEMA=n8n
+      - N8N_EMAIL_MODE=smtp
+      - N8N_SMTP_HOST= # Заполнить, если нужна отправка почты
+      - N8N_SMTP_PORT=587
+      - N8N_SMTP_USER=
+      - N8N_SMTP_PASS=
+      - N8N_SMTP_SENDER=
+      - N8N_SMTP_SSL=true
+    depends_on:
+      - ollama
+      - qdrant
+      # - supabase_db_service_name # Если n8n использует БД Supabase
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # --- SearXNG ---
+  searxng:
+    image: "{{ searxng_image }}"
+    container_name: searxng
+    restart: unless-stopped
+    ports: # Внутренний порт 8080, Caddy будет проксировать
+      - "127.0.0.1:8080:8080"
+    networks:
+      - ai_stack_network
+    volumes:
+      - "{{ ai_stack_project_dir }}/searxng:/etc/searxng:rw" # rw для генерации uwsgi.ini при первом запуске
+    environment:
+      - SEARXNG_BASE_URL={% if use_custom_domain == 'yes' %}https://searxng.{{ main_domain_name }}{% else %}http://{{ ansible_default_ipv4.address }}:{{ caddy_searxng_port | default('8006') }}{% endif %}/
+      # - INSTANCE_NAME=My SearXNG
+    # cap_drop и cap_add будут управляться Ansible-задачами для первого запуска
+    {% if searxng_first_run is defined and searxng_first_run %}
+    # cap_drop: [] # На время первого запуска cap_drop отключается
+    user: "root" # Для первого запуска, чтобы создать uwsgi.ini
+    {% else %}
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+      - DAC_OVERRIDE # Может быть нужен для uwsgi
+    user: "searxng" # После инициализации запускаем от пользователя searxng
+    {% endif %}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ==============================================================================
+  # Supabase Services (Интегрированная конфигурация)
+  # Основано на официальном docker-compose.yml Supabase для self-hosting
+  # https://github.com/supabase/supabase/tree/master/docker
+  # ==============================================================================
+
+  supabase_db: # Имя сервиса может быть просто 'db', если нет конфликтов
+    image: "{{ supabase_postgres_image | default('supabase/postgres:15.1.0.117') }}" # Уточнить актуальную версию
+    container_name: supabase_db
+    restart: unless-stopped
+    networks:
+      - ai_stack_network
+    volumes:
+      - supabase_db_data:/var/lib/postgresql/data
+      # Можно монтировать initdb скрипты, если нужно:
+      # - ./supabase_init_db:/docker-entrypoint-initdb.d
+    ports: # Обычно не публикуется наружу, доступ через Kong
+      - "127.0.0.1:{{ supabase_db_host_port | default(54322) }}:5432" # Для отладки или прямого доступа с хоста
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: "{{ supabase_postgres_password }}" # Из Ansible Vault / vars_prompt
+      POSTGRES_DB: postgres
+      # Дополнительные переменные для PostgreSQL, если нужны
+      # PGDATA: /var/lib/postgresql/data/pgdata
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    logging: &default_logging
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  supabase_kong: # Имя сервиса, на которое будет ссылаться Caddy
+    image: "{{ supabase_kong_image | default('supabase/kong:latest') }}" # Уточнить актуальную версию
+    container_name: supabase_kong
+    restart: unless-stopped
+    networks:
+      - ai_stack_network
+    ports: # Внутренний порт 8000, Caddy будет проксировать на него
+      - "127.0.0.1:{{ supabase_kong_host_port | default(8000) }}:8000" # Для отладки или прямого доступа с хоста
+      # - "8443:8443" # Если нужен HTTPS напрямую на Kong (обычно не нужно с Caddy)
+    environment:
+      # Общие переменные Kong
+      KONG_DATABASE: postgres
+      KONG_PG_HOST: supabase_db # Имя сервиса PostgreSQL
+      KONG_PG_USER: postgres
+      KONG_PG_PASSWORD: "{{ supabase_postgres_password }}"
+      KONG_PG_DATABASE: postgres # Kong использует ту же БД, но свою схему
+      KONG_PROXY_LISTEN: "0.0.0.0:8000"
+      KONG_ADMIN_LISTEN: "0.0.0.0:8001" # Админский API Kong, обычно не выставляется наружу
+      KONG_PLUGINS: "bundled,cors,key-auth" # Основные плагины
+      KONG_ANONYMOUS_CONSUMER_ID: "{{ supabase_anon_key }}" # Используется для анонимного доступа
+
+      # Переменные для интеграции с Supabase сервисами
+      # Эти URL должны указывать на соответствующие сервисы Supabase
+      SUPABASE_URL: "http://supabase_kong:8000" # URL самого Kong, как его видят другие сервисы
+      SUPABASE_PUBLIC_URL: "{% if use_custom_domain == 'yes' %}https://{{ SUPABASE_HOSTNAME }}{% else %}http://{{ ansible_default_ipv4.address }}:{{ caddy_supabase_port | default('8005') }}{% endif %}"
+
+      GOTRUE_URL: "http://supabase_gotrue:9999"
+      REALTIME_URL: "ws://supabase_realtime:4000/socket" # WebSocket
+      STORAGE_URL: "http://supabase_storage:5000"
+      META_URL: "http://supabase_meta:8080" # Для Supabase Studio и миграций
+      FUNCTIONS_URL: "http://supabase_edge_functions:8081"
+
+      # Секреты, используемые Supabase и Kong
+      JWT_SECRET: "{{ supabase_jwt_secret }}"
+      ANON_KEY: "{{ supabase_anon_key }}"
+      SERVICE_ROLE_KEY: "{{ supabase_service_role_key }}"
+
+      # Дополнительные настройки Kong, если нужны
+      # KONG_NGINX_WORKER_PROCESSES: "1"
+      # KONG_ADMIN_ACCESS_LOG: /dev/stdout
+      # KONG_ADMIN_ERROR_LOG: /dev/stderr
+      # KONG_PROXY_ACCESS_LOG: /dev/stdout
+      # KONG_PROXY_ERROR_LOG: /dev/stderr
+    depends_on:
+      supabase_db:
+        condition: service_healthy
+    logging: *default_logging
+
+  # --- GoTrue (Auth) ---
+  supabase_gotrue:
+    image: "{{ supabase_gotrue_image | default('supabase/gotrue:latest') }}" # Уточнить актуальную версию
+    container_name: supabase_gotrue
+    restart: unless-stopped
+    networks:
+      - ai_stack_network
+    # ports: # Обычно не публикуется наружу, доступ через Kong
+    #   - "127.0.0.1:9999:9999"
+    environment:
+      API_EXTERNAL_URL: "{% if use_custom_domain == 'yes' %}https://{{ SUPABASE_HOSTNAME }}{% else %}http://{{ ansible_default_ipv4.address }}:{{ caddy_supabase_port | default('8005') }}{% endif %}"
+      GOTRUE_API_HOST: "0.0.0.0"
+      GOTRUE_API_PORT: "9999"
+
+      GOTRUE_DB_DRIVER: postgres
+      GOTRUE_DB_DATABASE_URL: "postgresql://postgres:{{ supabase_postgres_password }}@supabase_db:5432/postgres"
+
+      GOTRUE_JWT_SECRET: "{{ supabase_jwt_secret }}"
+      GOTRUE_JWT_AUD: "authenticated"
+      GOTRUE_JWT_DEFAULT_GROUP_NAME: "authenticated"
+      GOTRUE_JWT_EXP: "3600" # 1 час
+
+      # GOTRUE_SITE_URL: "{{ supabase_site_url | default(API_EXTERNAL_URL) }}"
+      # GOTRUE_URI_SCHEME: "{% if use_custom_domain == 'yes' %}https{% else %}http{% endif %}"
+      # GOTRUE_OPERATOR_TOKEN: "{{ supabase_operator_token }}" # Сгенерировать
+
+      # Настройки для email (если используются)
+      # GOTRUE_SMTP_HOST:
+      # GOTRUE_SMTP_PORT:
+      # GOTRUE_SMTP_USER:
+      # GOTRUE_SMTP_PASS:
+      # GOTRUE_SMTP_ADMIN_EMAIL:
+      # GOTRUE_MAILER_AUTOCONFIRM: "true" # или "false" для подтверждения по email
+
+      # Внешние провайдеры OAuth (Google, GitHub и т.д.)
+      # GOTRUE_EXTERNAL_GOOGLE_ENABLED: "false"
+      # GOTRUE_EXTERNAL_GOOGLE_CLIENT_ID: ""
+      # GOTRUE_EXTERNAL_GOOGLE_SECRET: ""
+      # GOTRUE_EXTERNAL_GOOGLE_REDIRECT_URI: "{{ API_EXTERNAL_URL }}/auth/v1/callback"
+    depends_on:
+      supabase_db:
+        condition: service_healthy
+    logging: *default_logging
+
+  # --- Realtime ---
+  supabase_realtime:
+    image: "{{ supabase_realtime_image | default('supabase/realtime:latest') }}" # Уточнить актуальную версию
+    container_name: supabase_realtime
+    restart: unless-stopped
+    networks:
+      - ai_stack_network
+    # ports: # Обычно не публикуется наружу, доступ через Kong/WebSocket
+    #   - "127.0.0.1:4000:4000"
+    environment:
+      PORT: "4000"
+      DB_HOST: supabase_db
+      DB_PORT: "5432"
+      DB_USER: postgres
+      DB_PASSWORD: "{{ supabase_postgres_password }}"
+      DB_NAME: postgres
+      DB_SSL: "false" # Внутри Docker сети SSL обычно не нужен
+      SLOT_NAME: supabase_realtime # Имя слота репликации
+      JWT_SECRET: "{{ supabase_jwt_secret }}"
+      # ENABLE_TAILSCALE: "false"
+      # TAILSCALE_AUTHKEY: ""
+    depends_on:
+      supabase_db:
+        condition: service_healthy
+    logging: *default_logging
+
+  # --- Storage ---
+  supabase_storage:
+    image: "{{ supabase_storage_image | default('supabase/storage-api:latest') }}" # Уточнить актуальную версию
+    container_name: supabase_storage
+    restart: unless-stopped
+    networks:
+      - ai_stack_network
+    # ports: # Обычно не публикуется наружу, доступ через Kong
+    #   - "127.0.0.1:5000:5000"
+    environment:
+      ANON_KEY: "{{ supabase_anon_key }}"
+      SERVICE_ROLE_KEY: "{{ supabase_service_role_key }}"
+      JWT_SECRET: "{{ supabase_jwt_secret }}"
+      DATABASE_URL: "postgresql://postgres:{{ supabase_postgres_password }}@supabase_db:5432/postgres"
+      FILE_SIZE_LIMIT: "52428800" # 50MB
+      STORAGE_BACKEND: "file" # или "s3"
+      FILE_STORAGE_BACKEND_PATH: "/var/lib/storage" # Путь внутри контейнера
+      # Если STORAGE_BACKEND=s3, то нужны переменные для S3
+      # S3_ACCESS_KEY:
+      # S3_SECRET_KEY:
+      # S3_BUCKET:
+      # S3_ENDPOINT:
+      # S3_REGION:
+      # TENANT_ID: "stub" # Обычно не меняется для self-hosted
+      GLOBAL_S3_BUCKET: "supabase" # Имя бакета по умолчанию
+      REGION: "local-dev" # Регион по умолчанию
+    volumes:
+      - supabase_storage_data:/var/lib/storage # Том для хранения файлов
+    depends_on:
+      supabase_db:
+        condition: service_healthy
+      supabase_gotrue: {} # Storage зависит от GoTrue для аутентификации
+    logging: *default_logging
+
+  # --- Meta (Dashboard & Migrations) ---
+  supabase_meta:
+    image: "{{ supabase_meta_image | default('supabase/studio:latest') }}" # Уточнить актуальную версию
+    container_name: supabase_meta
+    restart: unless-stopped
+    networks:
+      - ai_stack_network
+    # ports: # Обычно не публикуется наружу, доступ через Kong
+    #   - "127.0.0.1:8080:8080" # Порт, на котором слушает Studio внутри контейнера
+    environment:
+      STUDIO_PG_META_URL: "http://supabase_meta:8080" # URL самого себя для некоторых операций
+      POSTGRES_HOST: supabase_db
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: "{{ supabase_postgres_password }}"
+      POSTGRES_DATABASE: postgres # Studio подключается к основной БД
+      # Для доступа к самому дашборду (если не через Kong)
+      # SUPABASE_PUBLIC_URL: "{% if use_custom_domain == 'yes' %}https://{{ SUPABASE_HOSTNAME }}{% else %}http://{{ ansible_default_ipv4.address }}:{{ caddy_supabase_port | default('8005') }}{% endif %}"
+      # SUPABASE_API_URL: "{{ API_EXTERNAL_URL }}" # Уже определен в GoTrue
+      # SUPABASE_GRAPHQL_URL: "{{ API_EXTERNAL_URL }}/graphql/v1"
+      # SUPABASE_REALTIME_URL: "{{ REALTIME_URL }}" # Уже определен в Kong
+      # SUPABASE_AUTH_EXTERNAL_PROVIDERS_ENABLED: "false" # или "true"
+      # SUPABASE_GOTRUE_URL: "http://supabase_gotrue:9999"
+      # JWT_SECRET: "{{ supabase_jwt_secret }}" # Studio также использует JWT для своих сессий
+      # ANON_KEY: "{{ supabase_anon_key }}"
+      # SERVICE_ROLE_KEY: "{{ supabase_service_role_key }}"
+      # Если используется кастомный дашборд
+      # DASHBOARD_USERNAME: "{{ supabase_dashboard_username }}"
+      # DASHBOARD_PASSWORD: "{{ supabase_dashboard_password }}"
+    depends_on:
+      supabase_db:
+        condition: service_healthy
+      supabase_gotrue: {}
+    logging: *default_logging
+
+  # --- Edge Functions ---
+  supabase_edge_functions:
+    image: "{{ supabase_functions_image | default('supabase/edge-runtime:latest') }}" # Уточнить актуальную версию
+    container_name: supabase_edge_functions
+    restart: unless-stopped
+    networks:
+      - ai_stack_network
+    # ports: # Обычно не публикуется наружу, доступ через Kong
+    #   - "127.0.0.1:8081:8081"
+    environment:
+      JWT_SECRET: "{{ supabase_jwt_secret }}"
+      SUPABASE_URL: "http://supabase_kong:8000" # URL Kong для внутренних запросов функций
+      SUPABASE_SERVICE_ROLE_KEY: "{{ supabase_service_role_key }}"
+      # VERIFY_JWT: "true"
+      # IMPORT_MAP_PATH: # Если есть import map
+      # MAIN_SERVICE_DIR: # Если функции не в корне
+    # volumes:
+      # - ./supabase_functions:/home/deno/functions # Пример монтирования директории с функциями
+    depends_on:
+      supabase_kong: {} # Функции могут вызывать API через Kong
+    logging: *default_logging
+
+  # --- (Опционально) Imgproxy для трансформации изображений в Storage ---
+  # supabase_imgproxy:
+  #   image: "{{ supabase_imgproxy_image | default('darthsim/imgproxy:latest') }}"
+  #   container_name: supabase_imgproxy
+  #   restart: unless-stopped
+  #   networks:
+  #     - ai_stack_network
+  #   environment:
+  #     IMGPROXY_URL_SIGNATURE_REQUIRED: "false" # или "true" с ключом и солью
+  #     # IMGPROXY_KEY:
+  #     # IMGPROXY_SALT:
+  #     IMGPROXY_USE_S3: "true" # Если Storage использует S3-совместимое хранилище
+  #     IMGPROXY_S3_ENDPOINT: # URL S3 эндпоинта Storage
+  #     # Остальные настройки S3, если нужны
+  #   depends_on:
+  #     supabase_storage: {}
+  #   logging: *default_logging
+
+  # ==============================================================================
+  # Langfuse Services
+  # Основано на docker-compose.yml из примера local-ai-packaged
+  # ==============================================================================
+
+  langfuse_postgres: # Отдельная БД для Langfuse
+    image: "{{ langfuse_postgres_image | default('postgres:15-alpine') }}"
+    container_name: langfuse_postgres
+    restart: unless-stopped
+    networks:
+      - ai_stack_network
+    volumes:
+      - langfuse_postgres_data:/var/lib/postgresql/data
+    ports: # Обычно не публикуется наружу
+      - "127.0.0.1:{{ langfuse_db_host_port | default(54333) }}:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: "{{ langfuse_postgres_password }}" # Отдельный пароль для БД Langfuse
+      POSTGRES_DB: langfuse_db # Отдельное имя БД
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d langfuse_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    logging: *default_logging
+
+  langfuse_clickhouse:
+    image: "{{ langfuse_clickhouse_image | default('clickhouse/clickhouse-server:latest') }}"
+    container_name: langfuse_clickhouse
+    restart: unless-stopped
+    networks:
+      - ai_stack_network
+    user: "101:101" # Как в примере
+    environment:
+      CLICKHOUSE_DB: default # Langfuse создаст свою БД 'langfuse'
+      CLICKHOUSE_USER: clickhouse_user # Пользователь для Langfuse
+      CLICKHOUSE_PASSWORD: "{{ langfuse_clickhouse_password }}"
+    volumes:
+      - langfuse_clickhouse_data:/var/lib/clickhouse
+      - langfuse_clickhouse_logs:/var/log/clickhouse-server
+    ports: # Обычно не публикуются наружу
+      - "127.0.0.1:{{ langfuse_clickhouse_http_port | default(8124) }}:8123" # HTTP
+      - "127.0.0.1:{{ langfuse_clickhouse_tcp_port | default(9001) }}:9000"  # TCP
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 1s
+    logging: *default_logging
+
+  langfuse_minio:
+    image: "{{ langfuse_minio_image | default('minio/minio:latest') }}"
+    container_name: langfuse_minio
+    restart: unless-stopped
+    networks:
+      - ai_stack_network
+    entrypoint: sh
+    command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data'
+    environment:
+      MINIO_ROOT_USER: minio_user # Пользователь для Langfuse
+      MINIO_ROOT_PASSWORD: "{{ langfuse_minio_root_password }}"
+    ports: # Обычно не публикуются наружу
+      - "127.0.0.1:{{ langfuse_minio_api_port | default(9090) }}:9000"    # MinIO API
+      - "127.0.0.1:{{ langfuse_minio_console_port | default(9091) }}:9001" # MinIO Console
+    volumes:
+      - langfuse_minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"] # mc должен быть в образе или нужно другое healthcheck
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s # Дать время MinIO на запуск
+    logging: *default_logging
+
+  langfuse_redis: # Используем Valkey как в примере
+    image: "{{ langfuse_valkey_image | default('docker.io/valkey/valkey:7-alpine') }}"
+    container_name: langfuse_redis
+    command: valkey-server --save 30 1 --loglevel warning
+    restart: unless-stopped
+    networks:
+      - ai_stack_network
+    volumes:
+      - langfuse_valkey_data:/data
+    ports: # Обычно не публикуется наружу
+      - "127.0.0.1:{{ langfuse_redis_host_port | default(6380) }}:6379"
+    cap_drop:
+      - ALL
+    cap_add:
+      - SETGID
+      - SETUID
+      - DAC_OVERRIDE
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 3s
+      timeout: 10s
+      retries: 10
+    logging: *default_logging
+
+  langfuse_worker:
+    image: "{{ langfuse_worker_image | default('langfuse/langfuse-worker:3') }}"
+    container_name: langfuse_worker
+    restart: unless-stopped
+    networks:
+      - ai_stack_network
+    depends_on:
+      langfuse_postgres:
+        condition: service_healthy
+      langfuse_minio:
+        condition: service_healthy # или service_started, если healthcheck mc не надежен
+      langfuse_redis:
+        condition: service_healthy
+      langfuse_clickhouse:
+        condition: service_healthy
+    # ports: # Внутренний сервис, не публикуется
+    #   - "127.0.0.1:3030:3030"
+    environment:
+      DATABASE_URL: "postgresql://postgres:{{ langfuse_postgres_password }}@langfuse_postgres:5432/langfuse_db"
+      SALT: "{{ langfuse_salt }}"
+      ENCRYPTION_KEY: "{{ langfuse_encryption_key }}"
+      TELEMETRY_ENABLED: "{{ langfuse_telemetry_enabled | default('false') }}"
+      # LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES: "true"
+
+      CLICKHOUSE_MIGRATION_URL: "clickhouse://langfuse_clickhouse:9000" # Используем имя сервиса
+      CLICKHOUSE_URL: "http://langfuse_clickhouse:8123" # Используем имя сервиса
+      CLICKHOUSE_USER: "clickhouse_user"
+      CLICKHOUSE_PASSWORD: "{{ langfuse_clickhouse_password }}"
+      # CLICKHOUSE_CLUSTER_ENABLED: "false"
+
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: "langfuse"
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: "auto"
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: "minio_user"
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: "{{ langfuse_minio_root_password }}"
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: "http://langfuse_minio:9000" # Используем имя сервиса
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      # LANGFUSE_S3_EVENT_UPLOAD_PREFIX: "events/"
+      # ... другие S3 переменные для media и batch_export, если нужны
+
+      REDIS_HOST: langfuse_redis # Используем имя сервиса
+      REDIS_PORT: "6379"
+      # REDIS_AUTH: # Если Redis требует пароль
+      # REDIS_TLS_ENABLED: "false"
+    logging: *default_logging
+
+  langfuse_web: # Имя сервиса, на которое будет ссылаться Caddy
+    image: "{{ langfuse_web_image | default('langfuse/langfuse:3') }}"
+    container_name: langfuse_web
+    restart: unless-stopped
+    networks:
+      - ai_stack_network
+    depends_on:
+      langfuse_worker: {} # Зависит от воркера, который зависит от баз данных
+    ports: # Внутренний порт 3000, Caddy будет проксировать
+      - "127.0.0.1:{{ langfuse_web_host_port | default(3002) }}:3000"
+    environment:
+      # Копируем большинство переменных из воркера
+      DATABASE_URL: "postgresql://postgres:{{ langfuse_postgres_password }}@langfuse_postgres:5432/langfuse_db"
+      SALT: "{{ langfuse_salt }}"
+      ENCRYPTION_KEY: "{{ langfuse_encryption_key }}"
+      TELEMETRY_ENABLED: "{{ langfuse_telemetry_enabled | default('false') }}"
+      CLICKHOUSE_MIGRATION_URL: "clickhouse://langfuse_clickhouse:9000"
+      CLICKHOUSE_URL: "http://langfuse_clickhouse:8123"
+      CLICKHOUSE_USER: "clickhouse_user"
+      CLICKHOUSE_PASSWORD: "{{ langfuse_clickhouse_password }}"
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: "langfuse"
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: "auto"
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: "minio_user"
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: "{{ langfuse_minio_root_password }}"
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: "http://langfuse_minio:9000"
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      REDIS_HOST: langfuse_redis
+      REDIS_PORT: "6379"
+
+      # Специфичные для Web UI
+      NEXTAUTH_URL: "{% if use_custom_domain == 'yes' %}https://{{ LANGFUSE_HOSTNAME }}{% else %}http://{{ ansible_default_ipv4.address }}:{{ caddy_langfuse_port | default('8007') }}{% endif %}"
+      NEXTAUTH_SECRET: "{{ langfuse_nextauth_secret }}" # Очень важный секрет
+      # LANGFUSE_INIT_ORG_ID:
+      # LANGFUSE_INIT_ORG_NAME:
+      # LANGFUSE_INIT_PROJECT_ID:
+      # LANGFUSE_INIT_PROJECT_NAME:
+      # LANGFUSE_INIT_PROJECT_PUBLIC_KEY:
+      # LANGFUSE_INIT_PROJECT_SECRET_KEY:
+      # LANGFUSE_INIT_USER_EMAIL: "{{ langfuse_init_user_email | default('') }}"
+      # LANGFUSE_INIT_USER_NAME: "{{ langfuse_init_user_name | default('') }}"
+      # LANGFUSE_INIT_USER_PASSWORD: "{{ langfuse_init_user_password | default('') }}"
+    logging: *default_logging
+
+# Конец файла

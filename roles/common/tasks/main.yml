@@ -1,0 +1,55 @@
+---
+# tasks file for common role
+- name: Обновление всех пакетов
+  ansible.builtin.apt:
+    update_cache: yes
+    upgrade: dist
+    autoremove: yes
+    autoclean: yes
+  tags: common_update
+
+- name: Установка базовых системных пакетов
+  ansible.builtin.apt:
+    name:
+      - apt-transport-https
+      - ca-certificates
+      - curl
+      - gnupg
+      - lsb-release
+      - software-properties-common
+      - python3-pip
+      - python3-venv # Для некоторых python утилит и pip модулей
+      - git
+      - ufw # Uncomplicated Firewall
+    state: present
+  tags: common_packages
+
+- name: Создание пользователя для запуска приложений
+  ansible.builtin.user:
+    name: "{{ vps_user_name }}"
+    password: "{{ vps_user_password }}" # Уже хешированный из vars_prompt
+    shell: /bin/bash
+    groups: sudo
+    append: yes
+    create_home: yes
+    state: present
+  tags: common_user
+
+- name: Настройка UFW (Uncomplicated Firewall)
+  community.general.ufw:
+    rule: "{{ item.rule }}"
+    port: "{{ item.port | default(omit) }}"
+    proto: "{{ item.proto | default(omit) }}"
+    src: "{{ item.src | default(omit) }}"
+    state: enabled # Включаем UFW, если еще не включен
+  loop:
+    - { rule: 'allow', port: '22', proto: 'tcp', comment: 'SSH' }
+    - { rule: 'allow', port: '80', proto: 'tcp', comment: 'HTTP' }
+    - { rule: 'allow', port: '443', proto: 'tcp', comment: 'HTTPS' }
+  notify: Reload UFW
+  tags: common_firewall
+
+- name: Включение UFW
+  community.general.ufw:
+    state: enabled
+  tags: common_firewall

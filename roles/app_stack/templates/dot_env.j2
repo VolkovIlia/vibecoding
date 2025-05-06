@@ -1,0 +1,78 @@
+# Переменные окружения для AI стека
+# Этот файл будет скопирован в /opt/ai_stack/.env
+# docker-compose.yml будет использовать эти переменные
+
+# --- Общие ---
+# TZ={{ ansible_date_time.tz }} # Можно установить таймзону для всех контейнеров, если нужно
+
+# --- n8n ---
+N8N_ENCRYPTION_KEY={{ n8n_encryption_key }}
+N8N_USER_MANAGEMENT_JWT_SECRET={{ n8n_jwt_secret }}
+# N8N_SMTP_HOST=
+# N8N_SMTP_PORT=587
+# N8N_SMTP_USER=
+# N8N_SMTP_PASS=
+# N8N_SMTP_SENDER=
+# N8N_SMTP_SSL=true
+# Если n8n использует внешнюю БД (например, Supabase)
+# DB_TYPE=postgresdb
+# DB_POSTGRESDB_HOST=supabase_db_service_name # Имя сервиса БД Supabase
+# DB_POSTGRESDB_PORT=5432
+# DB_POSTGRESDB_DATABASE=postgres
+# DB_POSTGRESDB_USER=postgres
+# DB_POSTGRESDB_PASSWORD={{ supabase_postgres_password }}
+# DB_POSTGRESDB_SCHEMA=n8n
+
+# --- OpenWebUI ---
+# WEBUI_SECRET_KEY={{ openwebui_secret_key }} # Сгенерировать для безопасности сессий
+
+# --- Flowise ---
+# FLOWISE_USERNAME={{ flowise_username | default('') }}
+# FLOWISE_PASSWORD={{ flowise_password | default('') }}
+
+# --- Qdrant ---
+# QDRANT_API_KEY={{ qdrant_api_key | default('') }} # Если включена аутентификация в Qdrant
+
+# --- Supabase ---
+# Эти переменные должны быть тщательно настроены согласно документации Supabase self-hosting
+# и значениям из Ansible Vault или vars_prompt.
+POSTGRES_PASSWORD={{ supabase_postgres_password }}
+JWT_SECRET={{ supabase_jwt_secret }}
+ANON_KEY={{ supabase_anon_key }}
+SERVICE_ROLE_KEY={{ supabase_service_role_key }}
+# DASHBOARD_USERNAME={{ supabase_dashboard_username }} # Для доступа к Supabase Studio
+# DASHBOARD_PASSWORD={{ supabase_dashboard_password }} # Для доступа к Supabase Studio
+
+# Дополнительные переменные Supabase (примеры, свериться с официальной документацией)
+# SITE_URL=https://{{ SUPABASE_HOSTNAME }}
+# ADDITIONAL_REDIRECT_URLS=
+# JWT_AUD=authenticated
+# DEFAULT_GOTRUE_JWT_EXP=3600
+# SMTP_ADMIN_EMAIL=
+# SMTP_HOST=
+# SMTP_PORT=
+# SMTP_USER=
+# SMTP_PASS=
+# SMTP_SENDER_NAME=
+# ... и многие другие
+
+# --- Langfuse ---
+# Эти переменные также должны быть тщательно настроены.
+LANGFUSE_SALT={{ langfuse_salt }}
+LANGFUSE_ENCRYPTION_KEY={{ langfuse_encryption_key }} # Отличается от N8N_ENCRYPTION_KEY
+LANGFUSE_NEXTAUTH_SECRET={{ langfuse_nextauth_secret }}
+LANGFUSE_POSTGRES_PASSWORD={{ langfuse_postgres_password }} # Пароль для БД Langfuse
+LANGFUSE_CLICKHOUSE_PASSWORD={{ langfuse_clickhouse_password }}
+LANGFUSE_MINIO_ROOT_PASSWORD={{ langfuse_minio_root_password }}
+
+# TELEMETRY_ENABLED={{ langfuse_telemetry_enabled | default('false') }}
+# LANGFUSE_INIT_USER_EMAIL={{ langfuse_init_user_email | default('') }}
+# LANGFUSE_INIT_USER_PASSWORD={{ langfuse_init_user_password | default('') }}
+# ... и другие переменные Langfuse
+
+# Важно: Все секреты (пароли, ключи API, JWT секреты) должны быть уникальными,
+# сложными и управляться через Ansible Vault или генерироваться при первом запуске
+# и выводиться пользователю (если это безопасно).
+# Переменные, закомментированные выше, являются примерами того, что может потребоваться.
+# Их точный набор и значения будут зависеть от финальной конфигурации сервисов
+# в docker-compose.yml.j2 и требований безопасности.

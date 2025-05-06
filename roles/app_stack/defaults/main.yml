@@ -1,0 +1,58 @@
+---
+# defaults file for app_stack
+
+# Директория для развертывания стека
+ai_stack_project_dir: "/opt/ai_stack"
+
+# Имена и версии образов (можно переопределить в group_vars или host_vars)
+n8n_image: "n8nio/n8n:latest"
+ollama_image: "ollama/ollama:latest"
+ollama_rocm_image: "ollama/ollama:rocm" # Для AMD GPU
+qdrant_image: "qdrant/qdrant:latest"
+open_webui_image: "ghcr.io/open-webui/open-webui:main"
+flowise_image: "flowiseai/flowise:latest"
+caddy_image: "docker.io/library/caddy:2-alpine"
+searxng_image: "docker.io/searxng/searxng:latest"
+
+# Supabase (примеры, будут расширены на основе официальной конфигурации)
+# Версии для Supabase лучше брать из их официального docker-compose.yml
+supabase_kong_image: "supabase/kong:latest"
+supabase_gotrue_image: "supabase/gotrue:latest"
+supabase_postgres_image: "postgres:15.1-alpine" # Пример, уточнить версию
+# ... и другие сервисы Supabase
+
+# Langfuse (примеры, будут расширены)
+langfuse_worker_image: "langfuse/langfuse-worker:3"
+langfuse_web_image: "langfuse/langfuse:3"
+langfuse_clickhouse_image: "clickhouse/clickhouse-server:latest"
+langfuse_minio_image: "minio/minio:latest"
+langfuse_postgres_image: "postgres:15.1-alpine" # Может использовать тот же, что и Supabase, или отдельный
+langfuse_valkey_image: "docker.io/valkey/valkey:8-alpine"
+
+# Настройки по умолчанию для Caddy (если не используется домен)
+caddy_n8n_port: "8001"
+caddy_openwebui_port: "8002"
+caddy_flowise_port: "8003"
+caddy_ollama_port: "8004"
+caddy_supabase_port: "8005" # Порт для Supabase Studio/API через Kong
+caddy_searxng_port: "8006"
+caddy_langfuse_port: "8007"
+
+# Переменные для секретов (должны быть переопределены в vars_prompt или vault)
+# Эти значения являются плейсхолдерами и НЕ ДОЛЖНЫ использоваться в продакшене.
+# Ansible должен генерировать их или запрашивать у пользователя.
+# Пример:
+# supabase_postgres_password: "YOUR_SECURE_POSTGRES_PASSWORD"
+# supabase_jwt_secret: "YOUR_VERY_SECURE_JWT_SECRET"
+# n8n_encryption_key: "YOUR_SECURE_N8N_ENCRYPTION_KEY"
+# ... и так далее для всех необходимых секретов.
+
+# Путь к файлам для импорта в n8n (если используется)
+# n8n_import_credentials_path: "./n8n_backup/credentials"
+# n8n_import_workflows_path: "./n8n_backup/workflows"
+
+# Настройки для резервного копирования
+backup_script_path: "{{ ai_stack_project_dir }}/backup_ai_stack.sh"
+backup_storage_dir: "{{ ai_stack_project_dir }}/backups"
+backup_cron_user: "{{ vps_user_name }}"
+backup_cron_job_name: "AI Stack Backup"

@@ -1,0 +1,56 @@
+# Ansible-specific
+*.retry
+*.vault
+*.log
+*.cfg # ansible.cfg, если он локальный
+inventory/hosts.ini # Часто содержит чувствительные данные, лучше держать свой локальный и добавлять в .gitignore
+inventory/host_vars/ # Может содержать чувствительные данные
+inventory/group_vars/ # Может содержа_vars/ # Может содержать чувствительные данные
+
+# Python specific
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.Python
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.coverage
+.cache/
+nosetests.xml
+coverage.xml
+*.cover
+*.hypothesis/
+.pytest_cache/
+instance/
+
+# Docker specific
+**/docker-compose.override.yml # Локальные переопределения
+**/.env # Файл .env в корне проекта, генерируемый из .env.j2, не должен быть в репозитории
+**/supabase/docker/.env # Если используется подход с клонированием supabase
+
+# IDE / Editor specific
+.vscode/
+.idea/
+*.swp
+*~
+*.sublime-project
+*.sublime-workspace
+
+# OS specific
+.DS_Store
+Thumbs.db
+
+# Local AI Stack specific (если будут генерироваться локально)
+/opt/ai_stack/ # Если эта директория создается локально для тестов, а не только на VPS
+/opt/ai_stack/.env # Сгенерированный .env на VPS
+/opt/ai_stack/Caddyfile # Сгенерированный Caddyfile на VPS
+/opt/ai_stack/docker-compose.yml # Сгенерированный docker-compose.yml на VPS
+/opt/ai_stack/searxng/settings.yml # Сгенерированный settings.yml на VPS
+
+# Скачанные зависимости или временные файлы
+vendor/
+node_modules/
+*.tar.gz
+*.zip

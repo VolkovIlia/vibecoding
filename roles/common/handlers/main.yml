@@ -1,0 +1,5 @@
+---
+# handlers file for common
+- name: Reload UFW
+  ansible.builtin.command: ufw reload
+  changed_when: false # Команда ufw reload не всегда возвращает stdout, который Ansible может интерпретировать как изменение

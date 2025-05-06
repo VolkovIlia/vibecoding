@@ -1,0 +1,109 @@
+{
+    debug
+    email {{ LETSENCRYPT_EMAIL | default('internal@example.com') }}
+    # acme_ca https://acme-staging-v02.api.letsencrypt.org/directory # Для тестирования Let's Encrypt
+    default_sni {{ main_domain_name | default("localhost") }}
+
+    # Глобальные настройки TLS (если нужны специфичные)
+    # tls {
+    #   protocols tls1.2 tls1.3
+    #   ciphers TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384 TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384 TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256 TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256
+    # }
+}
+
+# n8n
+{{ N8N_HOSTNAME }} {
+    reverse_proxy n8n:5678
+}
+
+# Open WebUI
+{{ OPENWEBUI_HOSTNAME }} {
+    reverse_proxy openwebui:8080 # OpenWebUI слушает на 8080 внутри контейнера
+}
+
+# Flowise
+{{ FLOWISE_HOSTNAME }} {
+    reverse_proxy flowise:3001
+}
+
+# Ollama API (если нужно выставить наружу, обычно не рекомендуется без аутентификации)
+# {{ OLLAMA_HOSTNAME }} {
+#    reverse_proxy ollama:11434
+# }
+
+# Supabase (Kong API Gateway)
+{{ SUPABASE_HOSTNAME }} {
+    # Supabase Kong слушает на порту 8000 внутри контейнера
+    reverse_proxy supabase_kong:8000
+}
+
+# Langfuse Web UI
+{{ LANGFUSE_HOSTNAME }} {
+    # Langfuse Web слушает на порту 3000 внутри контейнера
+    reverse_proxy langfuse_web:3000
+}
+
+# SearXNG
+{{ SEARXNG_HOSTNAME }} {
+    encode zstd gzip
+
+    @api {
+        path /config
+        path /healthz
+        path /stats/errors
+        path /stats/checker
+    }
+    @search {
+        path /search
+        path /opensearch.xml
+        path /autocompleter
+    }
+    @imageproxy {
+        path /image_proxy
+    }
+    @static {
+        path /static/*
+        path /morty/*
+        path /robots.txt
+        path /favicon.ico
+    }
+
+    header {
+        # CSP (https://content-security-policy.com)
+        Content-Security-Policy "upgrade-insecure-requests; default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; form-action 'self'; font-src 'self'; frame-ancestors 'self'; base-uri 'self'; connect-src 'self' https://overpass-api.de; img-src * data:; frame-src https://www.youtube-nocookie.com https://player.vimeo.com https://www.dailymotion.com https://www.deezer.com https://www.mixcloud.com https://w.soundcloud.com https://embed.spotify.com;"
+        Permissions-Policy "accelerometer=(),camera=(),geolocation=(),gyroscope=(),magnetometer=(),microphone=(),payment=(),usb=()"
+        Referrer-Policy "no-referrer"
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "SAMEORIGIN"
+        X-XSS-Protection "1; mode=block"
+        # X-Robots-Tag (comment to allow site indexing)
+        X-Robots-Tag "noindex, noarchive, nofollow"
+        # Remove "Server" header
+        -Server
+    }
+
+    header @api {
+        Access-Control-Allow-Methods "GET, OPTIONS"
+        Access-Control-Allow-Origin "*"
+    }
+
+    route {
+        header Cache-Control "max-age=0, no-store, no-cache, must-revalidate"
+        header @search Cache-Control "max-age=5, private"
+        header @imageproxy Cache-Control "max-age=604800, public" # 7 days
+        header @static Cache-Control "max-age=31536000, public, immutable" # 1 year
+    }
+
+    # SearXNG (uWSGI)
+    reverse_proxy searxng:8080 {
+        # header_up X-Forwarded-Proto {scheme} # Caddy v2 автоматически устанавливает это
+        # header_up Host {host} # Caddy v2 автоматически устанавливает это
+        # header_up X-Real-IP {http.request.remote.host} # Caddy v2 автоматически устанавливает это
+    }
+}
+
+# Пример для доступа к Qdrant HTTP API (если нужно, обычно не выставляется наружу)
+# qdrant.{{ main_domain_name | default("localhost") }} {
+#    reverse_proxy qdrant:6334
+# }

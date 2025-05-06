@@ -1,0 +1,114 @@
+---
+- hosts: all
+  become: yes
+  gather_facts: yes
+
+  vars_prompt:
+    - name: "vps_user_name"
+      prompt: "Введите имя пользователя, которое будет создано на VPS"
+      private: no
+
+    - name: "vps_user_password"
+      prompt: "Введите пароль для нового пользователя"
+      private: yes
+      encrypt: "sha512_crypt" # Для ansible.builtin.user
+      confirm: yes
+
+    - name: "use_custom_domain"
+      prompt: "Использовать собственный домен для доступа к сервисам и автоматического HTTPS? (yes/no)"
+      private: no
+      default: "no"
+
+    - name: "main_domain_name"
+      prompt: "Если да, введите основное доменное имя (например, example.com)"
+      private: no
+      default: "localhost"
+      when: use_custom_domain == "yes"
+
+    - name: "letsencrypt_email"
+      prompt: "Введите ваш email для регистрации SSL-сертификатов Let's Encrypt (необходимо, если используете собственный домен)"
+      private: no
+      default: "user@example.com"
+      when: use_custom_domain == "yes"
+      
+    - name: "ollama_profile"
+      prompt: "Какой профиль использовать для Ollama? (cpu, nvidia, amd)"
+      private: no
+      default: "cpu"
+
+    - name: "ollama_initial_models"
+      prompt: "Какие модели Ollama загрузить при первом запуске? (через запятую, например, 'qwen2.5:7b-instruct-q4_K_M,nomic-embed-text', оставьте пустым, чтобы не загружать)"
+      private: no
+      default: "qwen2.5:7b-instruct-q4_K_M,nomic-embed-text"
+
+    - name: "enable_backups"
+      prompt: "Включить автоматическое резервное копирование? (yes/no)"
+      private: no
+      default: "no"
+
+    - name: "backup_time"
+      prompt: "Если да, укажите время для ежедневного резервного копирования (например, '03:00')"
+      private: no
+      default: "03:00"
+      when: enable_backups == "yes"
+
+    # --- Секреты n8n ---
+    - name: "n8n_encryption_key"
+      prompt: "Введите N8N_ENCRYPTION_KEY (сгенерируйте случайную строку)"
+      private: yes
+    - name: "n8n_jwt_secret"
+      prompt: "Введите N8N_USER_MANAGEMENT_JWT_SECRET (сгенерируйте случайную строку)"
+      private: yes
+
+    # --- Секреты Supabase ---
+    - name: "supabase_postgres_password"
+      prompt: "Введите POSTGRES_PASSWORD для Supabase (должен быть сложным)"
+      private: yes
+    - name: "supabase_jwt_secret"
+      prompt: "Введите JWT_SECRET для Supabase (минимум 32 символа, случайная строка)"
+      private: yes
+    - name: "supabase_anon_key"
+      prompt: "Введите ANON_KEY для Supabase (публичный ключ, можно сгенерировать)"
+      private: yes
+    - name: "supabase_service_role_key"
+      prompt: "Введите SERVICE_ROLE_KEY для Supabase (секретный ключ, можно сгенерировать)"
+      private: yes
+
+    # --- Секреты Langfuse ---
+    - name: "langfuse_salt"
+      prompt: "Введите LANGFUSE_SALT (сгенерируйте случайную строку)"
+      private: yes
+    - name: "langfuse_encryption_key"
+      prompt: "Введите LANGFUSE_ENCRYPTION_KEY (сгенерируйте случайную строку, отличную от n8n)"
+      private: yes
+    - name: "langfuse_nextauth_secret"
+      prompt: "Введите LANGFUSE_NEXTAUTH_SECRET (сгенерируйте случайную строку)"
+      private: yes
+    - name: "langfuse_postgres_password"
+      prompt: "Введите пароль для PostgreSQL базы данных Langfuse"
+      private: yes
+    - name: "langfuse_clickhouse_password"
+      prompt: "Введите пароль для ClickHouse пользователя Langfuse"
+      private: yes
+    - name: "langfuse_minio_root_password"
+      prompt: "Введите пароль для MinIO пользователя Langfuse"
+      private: yes
+
+  pre_tasks:
+    - name: Обновление кэша apt (для последующей установки python3-apt)
+      ansible.builtin.raw: apt-get update -y -qq
+      changed_when: false
+      when: ansible_facts['pkg_mgr'] == 'apt'
+
+    - name: Убедиться, что python3-apt установлен (необходим для модуля apt)
+      ansible.builtin.raw: apt-get install -y -qq python3-apt
+      changed_when: false
+      when: ansible_facts['pkg_mgr'] == 'apt'
+
+    - name: Пересобрать факты после установки python3-apt
+      ansible.builtin.setup:
+
+  roles:
+    - role: common
+    - role: docker
+    - role: app_stack

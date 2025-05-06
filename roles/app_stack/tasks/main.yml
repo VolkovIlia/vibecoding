@@ -1,0 +1,150 @@
+---
+# tasks file for app_stack role
+
+- name: Создание директории для AI стека
+  ansible.builtin.file:
+    path: "/opt/ai_stack"
+    state: directory
+    owner: "{{ vps_user_name }}"
+    group: "{{ vps_user_name }}" # или root, в зависимости от предпочтений
+    mode: '0755'
+  tags: app_stack_setup
+
+- name: Создание поддиректории для конфигурации SearXNG
+  ansible.builtin.file:
+    path: "/opt/ai_stack/searxng"
+    state: directory
+    owner: "{{ vps_user_name }}"
+    group: "{{ vps_user_name }}"
+    mode: '0755'
+  tags: app_stack_setup
+
+- name: Копирование базового файла настроек SearXNG
+  ansible.builtin.template:
+    src: searxng_settings.yml.j2 # Будет создан позже
+    dest: "/opt/ai_stack/searxng/settings.yml"
+    owner: "{{ vps_user_name }}"
+    group: "{{ vps_user_name }}"
+    mode: '0644'
+  tags: app_stack_searxng_config
+
+- name: Генерация и установка секретного ключа для SearXNG
+  ansible.builtin.block:
+    - name: Генерация секретного ключа SearXNG
+      ansible.builtin.command: openssl rand -hex 32
+      register: searxng_secret_key_cmd
+      changed_when: false
+
+    - name: Установка секретного ключа в settings.yml SearXNG
+      ansible.builtin.lineinfile:
+        path: "/opt/ai_stack/searxng/settings.yml"
+        regexp: '^secret_key : "ultrasecretkeyplaceholder!!!.*$'
+        line: 'secret_key : "{{ searxng_secret_key_cmd.stdout }}"'
+        backrefs: yes
+  tags: app_stack_searxng_config
+
+- name: Копирование шаблона Caddyfile
+  ansible.builtin.template:
+    src: Caddyfile.j2 # Будет создан позже
+    dest: "/opt/ai_stack/Caddyfile"
+    owner: "{{ vps_user_name }}"
+    group: "{{ vps_user_name }}"
+    mode: '0644'
+  tags: app_stack_caddy_config
+  notify: Restart app_stack (docker compose) # Уведомляем о перезапуске, если Caddyfile изменился
+
+- name: Копирование шаблона .env файла (если используется)
+  ansible.builtin.template:
+    src: dot_env.j2 # Будет создан позже
+    dest: "/opt/ai_stack/.env"
+    owner: "{{ vps_user_name }}"
+    group: "{{ vps_user_name }}"
+    mode: '0600' # Секреты должны быть защищены
+  tags: app_stack_env_config
+  notify: Restart app_stack (docker compose)
+
+- name: Копирование шаблона docker-compose.yml
+  ansible.builtin.template:
+    src: docker-compose.yml.j2 # Будет создан позже
+    dest: "/opt/ai_stack/docker-compose.yml"
+    owner: "{{ vps_user_name }}"
+    group: "{{ vps_user_name }}"
+    mode: '0644'
+  tags: app_stack_compose_config
+  notify: Restart app_stack (docker compose)
+
+# --- Задачи для обработки cap_drop SearXNG ---
+- name: Проверка, существует ли uwsgi.ini в контейнере SearXNG (индикатор первого запуска)
+  ansible.builtin.docker_container_exec:
+    container: searxng # Имя контейнера SearXNG
+    command: "sh -c '[ -f /etc/searxng/uwsgi.ini ] && echo found || echo not_found'"
+  register: searxng_uwsgi_check
+  changed_when: false
+  failed_when: false # Не падать, если контейнер еще не запущен или команда не найдена
+  ignore_errors: yes # Игнорировать ошибки, если контейнер еще не существует
+  tags: app_stack_searxng_init
+
+- name: Установка флага первого запуска для SearXNG
+  ansible.builtin.set_fact:
+    searxng_first_run: "{{ searxng_uwsgi_check.stdout is defined and 'not_found' in searxng_uwsgi_check.stdout }}"
+  when: searxng_uwsgi_check.rc == 0 # Только если команда выполнилась успешно
+  tags: app_stack_searxng_init
+
+- name: Вывод статуса первого запуска SearXNG
+  ansible.builtin.debug:
+    msg: "SearXNG first run status: {{ searxng_first_run | default('не определен, возможно контейнер еще не был запущен') }}"
+  tags: app_stack_searxng_init
+
+# Если это первый запуск, docker-compose.yml.j2 должен быть сгенерирован
+# с user: root и без cap_drop для SearXNG.
+# Затем мы запускаем стек, SearXNG инициализируется.
+# После этого, searxng_first_run станет false, и docker-compose.yml.j2
+# будет сгенерирован с user: searxng и с cap_drop.
+# Docker Compose модуль сам обработает изменения в конфигурации и перезапустит сервис.
+
+- name: Копирование шаблона docker-compose.yml (повторно, с учетом searxng_first_run)
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: "{{ ai_stack_project_dir }}/docker-compose.yml"
+    owner: "{{ vps_user_name }}"
+    group: "{{ vps_user_name }}"
+    mode: '0644'
+  tags: app_stack_compose_config_searxng_update # Отдельный тег для этого шага
+  notify: Restart app_stack (docker compose)
+  when: searxng_first_run is defined # Только если мы смогли определить статус первого запуска
+
+- name: Запуск Docker Compose стека приложений
+  community.docker.docker_compose_v2:
+    project_src: "/opt/ai_stack"
+    state: present # Запускает или обновляет сервисы
+    pull: policy # 'always', 'missing', 'never', 'build'. 'policy' - pull if image is missing or tag is 'latest'
+    remove_orphans: yes
+    recreate: smart # 'always', 'never', 'smart'. 'smart' - recreate if config or image changed
+  tags: app_stack_run
+  # environment: # Можно передавать переменные окружения напрямую, если не используется .env файл
+  #   SOME_VARIABLE: "some_value"
+
+# --- Задачи для инициализации Ollama (загрузка моделей) ---
+- name: Инициализация Ollama - загрузка моделей
+  ansible.builtin.docker_container_exec:
+    container: ollama # Имя контейнера Ollama
+    command: "ollama pull {{ item }}"
+  loop: "{{ ollama_initial_models.split(',') | map('trim') | list }}"
+  when: ollama_initial_models is defined and ollama_initial_models | length > 0
+  register: ollama_pull_results
+  changed_when: "'pull complete' in item.stdout" # Считать измененным, если модель действительно была загружена
+  loop_control:
+    label: "{{ item }}"
+  tags: app_stack_ollama_init
+
+- name: Вывод результатов загрузки моделей Ollama
+  ansible.builtin.debug:
+    var: ollama_pull_results
+  when: ollama_pull_results is defined and ollama_pull_results.results
+  tags: app_stack_ollama_init
+
+# --- Задачи для инициализации n8n (импорт workflows/credentials) ---
+# Будет добавлено позже
+
+# --- Задачи для резервного копирования ---
+# Будет добавлено позже
